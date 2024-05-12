@@ -1,0 +1,312 @@
+#include <MQUnifiedsensor.h>
+#include <Wire.h>
+#include <TimeLib.h>
+#include <DS1307RTC.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Adafruit_TMP117.h>
+#include <Adafruit_Sensor.h>
+#include <SoftwareSerial.h>
+#include <Arduino.h>
+
+/************************Hardware Related Macros************************************/
+#define         Board                   ("Arduino Mega")
+#define         Voltage_Resolution      (5) // Volt resolution to calculate the voltage
+#define         ADC_Bit_Resolution      (10) // 10 bit ADC
+#define         Type                    ("MQ") // Generic MQ sensor type for initialization
+
+// Clean Air Ratios
+#define         RatioMQ2CleanAir        (9.83)
+#define         RatioMQ5CleanAir        (6.5)
+#define         RatioMQ6CleanAir        (10)
+#define         RatioMQ9CleanAir        (9.6)
+
+// Pin Assignments
+#define         MQ2_Pin                 (A4)
+#define         MQ5_1_Pin               (A0)
+#define         MQ5_2_Pin               (A1)
+#define         MQ6_Pin                 (A2)
+#define         MQ9_Pin                 (A3)
+
+// Sensor and SD card setup
+const int mq2Pin = A4;
+const int mq5Pin1 = A0;
+const int mq5Pin2 = A1;
+const int mq6Pin = A2;
+const int mq9Pin = A3;
+const int chipSelect = 53;
+Adafruit_TMP117 tmp117;
+
+
+
+/*****************************Sensor Initialization***********************************************/
+MQUnifiedsensor MQ2(Board, Voltage_Resolution, ADC_Bit_Resolution, MQ2_Pin, "MQ-2");
+MQUnifiedsensor MQ5_1(Board, Voltage_Resolution, ADC_Bit_Resolution, MQ5_1_Pin, "MQ-5");
+MQUnifiedsensor MQ5_2(Board, Voltage_Resolution, ADC_Bit_Resolution, MQ5_2_Pin, "MQ-5");
+MQUnifiedsensor MQ6(Board, Voltage_Resolution, ADC_Bit_Resolution, MQ6_Pin, "MQ-6");
+MQUnifiedsensor MQ9(Board, Voltage_Resolution, ADC_Bit_Resolution, MQ9_Pin, "MQ-9");
+
+unsigned long oldTime = 0;
+
+/***************************Average Read*******************************************************/
+int averageAnalogRead(int pin) {
+  long sum = 0;
+  for (int i = 0; i < 25; i++) {
+    sum += analogRead(pin);
+    delay(1); // Short delay to allow for ADC recovery, might be adjusted or removed based on your needs
+  }
+  return sum / 25;
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial); // wait for serial port to connect.
+  delay(200);
+  Serial1.begin(57600); // Initialize serial communication with HC-05
+  Serial.println("RTC and Sensors Read Test");
+  Serial.println("-------------------------");
+
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card failed, or not present");
+    while (1); // Stay here forever
+  }
+  Serial.println("SD card initialized.");
+
+  if (!tmp117.begin()) {
+    Serial.println("Failed to find TMP117 sensor!");
+    while (1); // Stay here forever
+  }
+  Serial.println("TMP117 initialized");
+
+  pinMode(MQ2_Pin, INPUT);
+  pinMode(MQ5_1_Pin, INPUT);
+  pinMode(MQ5_2_Pin, INPUT);
+  pinMode(MQ6_Pin, INPUT);
+  pinMode(MQ9_Pin, INPUT);
+
+  // Warm-up delay for sensors
+  Serial.println("Warming up sensors, please wait...");
+  delay(20000); // 20 seconds warm-up time
+
+  // Calibrate sensors
+    Serial.print("Calibrating please wait.");
+    float r0Values[5] = {0};
+    for(int i = 1; i <= 10; i++) {
+        MQ2.update();
+        r0Values[0] += MQ2.calibrate(RatioMQ2CleanAir);
+        
+        MQ5_1.update();
+        r0Values[1] += MQ5_1.calibrate(RatioMQ5CleanAir);
+        
+        MQ5_2.update();
+        r0Values[2] += MQ5_2.calibrate(RatioMQ5CleanAir);
+        
+        MQ6.update();
+        r0Values[3] += MQ6.calibrate(RatioMQ6CleanAir);
+        
+        MQ9.update();
+        r0Values[4] += MQ9.calibrate(RatioMQ9CleanAir);
+
+        Serial.print(".");
+    }
+    
+    // Set R0 for each sensor
+    MQ2.setR0(r0Values[0] / 10);
+    MQ5_1.setR0(r0Values[1] / 10);
+    MQ5_2.setR0(r0Values[2] / 10);
+    MQ6.setR0(r0Values[3] / 10);
+    MQ9.setR0(r0Values[4] / 10);
+    
+    Serial.println(" done!");
+    Serial.println("R0 values for each sensor:");
+    Serial.println("MQ2: " + String(r0Values[0] / 10));
+    Serial.println("MQ5_1: " + String(r0Values[1] / 10));
+    Serial.println("MQ5_2: " + String(r0Values[2] / 10));
+    Serial.println("MQ6: " + String(r0Values[3] / 10));
+    Serial.println("MQ9: " + String(r0Values[4] / 10));
+}
+
+void loop() {
+  // Ensure a consistent delay between readings
+  unsigned long currentMillis = millis();
+  if (currentMillis - oldTime >= 1000) { // 1 second has passed
+    oldTime = currentMillis;
+    //read and print PPM
+    readAndPrintGases();
+    //log raw sensor data
+    dataString();
+  }
+}
+
+float calibrateSensor(MQUnifiedsensor& sensor, float ratioCleanAir, const String& sensorName) {
+  Serial.print("Calibrating ");
+  Serial.print(sensorName);
+  Serial.println(" Please wait.");
+
+  float calcR0 = 0;
+  for (int i = 1; i <= 10; i++) {
+    sensor.update();
+    calcR0 += sensor.calibrate(ratioCleanAir);
+    Serial.print(".");
+  }
+  sensor.setR0(calcR0 / 10);
+  Serial.println(" done!");
+  Serial.print("Calibrated R0 for ");
+  Serial.print(sensorName);
+  Serial.print(": ");
+  Serial.println(calcR0 / 10, 3);
+
+  return calcR0 / 10;
+}
+
+
+void readAndPrintGases() {
+    // Read sensor values
+    float mq2_smoke = readGas(MQ2, "SMOKE", 3616.1, -2.675);
+    float mq5_1_alcohol = readGas(MQ5_1, "Alcohol", 97124, -4.918);
+    float mq5_2_co = readGas(MQ5_2, "CO", 491204, -4.918);
+    float mq6_lpg = readGas(MQ6, "LPG", 1009.2, -2.35);
+    float mq9_ch4 = readGas(MQ9, "CH4", 4269.6, -2.648);
+
+    // Print temperature and timestamp
+    sensors_event_t temp;
+    tmp117.getEvent(&temp);
+    printTimestamp();
+    Serial.print("   Temp: ");
+    Serial.print(temp.temperature);
+    Serial.println("C");
+
+    // Print headers
+    Serial.println("Sensor:      MQ2  |    MQ5-1  |    MQ5-2  |     MQ6   |    MQ9");
+    Serial.println("----------------------------------------------------------------");
+
+    // Print rows for each gas
+    Serial.print("Smoke:      ");
+    Serial.print(mq2_smoke, 2);
+    Serial.println(" ppm");
+
+    Serial.print("Alcohol:    ");
+    Serial.print(mq5_1_alcohol, 2);
+    Serial.println(" ppm");
+
+    Serial.print("CO:         ");
+    Serial.print(mq5_2_co, 2);
+    Serial.println(" ppm");
+
+    Serial.print("LPG:        ");
+    Serial.print(mq6_lpg, 2);
+    Serial.println(" ppm");
+
+    Serial.print("CH4:        ");
+    Serial.print(mq9_ch4, 2);
+    Serial.println(" ppm");
+
+    // Optionally print to another serial interface
+    Serial1.println("Sensor Readings:");
+    Serial1.print("Smoke: ");
+    Serial1.print(mq2_smoke);
+    Serial1.println(" ppm");
+    Serial1.print("Alcohol: ");
+    Serial1.print(mq5_1_alcohol);
+    Serial1.println(" ppm");
+    Serial1.print("CO: ");
+    Serial1.print(mq5_2_co);
+    Serial1.println(" ppm");
+    Serial1.print("LPG: ");
+    Serial1.print(mq6_lpg);
+    Serial1.println(" ppm");
+    Serial1.print("CH4: ");
+    Serial1.print(mq9_ch4);
+    Serial1.println(" ppm");
+}
+
+float readGas(MQUnifiedsensor &sensor, const String &gasType, double a, double b) {
+    sensor.setA(a);
+    sensor.setB(b);
+    sensor.update();
+    return sensor.readSensor();
+}
+
+void printTimestamp() {
+    tmElements_t tm;
+    if (RTC.read(tm)) {
+        // Print the timestamp
+        print2digits(tm.Day);
+        Serial.print("/");
+        print2digits(tm.Month);
+        Serial.print("/");
+        Serial.print(tmYearToCalendar(tm.Year)); // Convert tm.Year to full year
+        Serial.print(" ");
+        print2digits(tm.Hour);
+        Serial.print(":");
+        print2digits(tm.Minute);
+        Serial.print(":");
+        print2digits(tm.Second);
+        Serial.println();
+    } else {
+        Serial.println("Unable to read RTC");
+    }
+}
+
+void print2digits(int number) {
+    if (number < 10) {
+        Serial.print('0');
+    }
+    Serial.print(number);
+}
+
+void dataString() {
+  tmElements_t tm;
+  sensors_event_t temp;
+  tmp117.getEvent(&temp); // Get temperature event
+
+  int mq2Value = averageAnalogRead(mq2Pin);
+  int mq5Value1 = averageAnalogRead(mq5Pin1);
+  int mq5Value2 = averageAnalogRead(mq5Pin2);
+  int mq6Value = averageAnalogRead(mq6Pin);
+  int mq9Value = averageAnalogRead(mq9Pin);
+
+    float mq2_smoke = readGas(MQ2, "SMOKE", 3616.1, -2.675);
+    float mq5_1_alcohol = readGas(MQ5_1, "Alcohol", 97124, -4.918);
+    float mq5_2_co = readGas(MQ5_2, "CO", 491204, -4.918);
+    float mq6_lpg = readGas(MQ6, "LPG", 1009.2, -2.35);
+    float mq9_ch4 = readGas(MQ9, "CH4", 4269.6, -2.648);
+
+  if (RTC.read(tm)) {
+    String timestamp = String(tm.Day) + "/" + String(tm.Month) + "/" + String(tmYearToCalendar(tm.Year)) + " " + String(tm.Hour) + ":" + String(tm.Minute) + ":" + String(tm.Second);
+   
+   
+        // Compose the data strings
+        String dataString1 = timestamp + ", Temp: " + String(temp.temperature) + "C";
+        dataString1 += ", Analog MQ2: " + String(mq2Value);
+        dataString1 += ", Analog MQ5-1: " + String(mq5Value1);
+        dataString1 += ", Analog MQ5-2: " + String(mq5Value2);
+        dataString1 += ", Analog MQ6: " + String(mq6Value);
+        dataString1 += ", Analog MQ9: " + String(mq9Value);
+
+        String dataString2 = timestamp + ", Temp: " + String(temp.temperature) + "C";
+        dataString2 += ", Smoke PPM: " + String(mq2_smoke);
+        dataString2 += ", Alcohol PPM: " + String(mq5_1_alcohol);
+        dataString2 += ", CO PPM: " + String(mq5_2_co);
+        dataString2 += ", LPG PPM: " + String(mq6_lpg);
+        dataString2 += ", CH4 PPM: " + String(mq9_ch4);
+
+        // Log data to SD card
+        File dataFile = SD.open("datalog.txt", FILE_WRITE);
+        if (dataFile) {
+            dataFile.println(dataString1); // Write the first line with analog readings
+            dataFile.println(dataString2); // Write the second line with PPM values
+            dataFile.close();
+            Serial.println(dataString1); // Optionally print the first data string to Serial
+            Serial.println(dataString2); // Optionally print the second data string to Serial
+            Serial1.println(dataString1); // Send first data string over Bluetooth
+            Serial1.println(dataString2); // Send second data string over Bluetooth
+        } else {
+            Serial.println("Error opening datalog.txt");
+            Serial1.println("Error opening datalog.txt");
+        }
+    } else {
+        Serial.println("RTC read error!");
+        Serial1.println("RTC read error!");
+    }
+}
